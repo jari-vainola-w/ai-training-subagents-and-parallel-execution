@@ -1,0 +1,228 @@
+name: Step 1
+
+env:
+  EXERCISE_NAME: "subagents-and-parallel-execution"
+  MODULE_TITLE: "Subagents and Parallel Execution"
+
+on:
+  push:
+    paths:
+      - 'docs/**'
+      - 'backend/**'
+      - 'frontend/**'
+      - '.claude/**'
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+jobs:
+  check_initial_commit:
+    name: Check if initial commit
+    runs-on: ubuntu-latest
+    outputs:
+      is-initial: ${{ steps.check.outputs.is-initial }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commit count
+        id: check
+        run: |
+          commit_count=$(git rev-list --count HEAD)
+          echo "is-initial=$([[ $commit_count -eq 1 ]] && echo true || echo false)" >> $GITHUB_OUTPUT
+
+  find_exercise:
+    name: Find Exercise Issue
+    needs: check_initial_commit
+    if: needs.check_initial_commit.outputs.is-initial == 'false'
+    uses: ./.github/workflows/find-exercise-issue.yml
+
+  post_checking_message:
+    name: Post checking work message
+    needs: [find_exercise]
+    runs-on: ubuntu-latest
+    outputs:
+      comment-id: ${{ steps.post.outputs.comment-id }}
+    env:
+      ISSUE_NUMBER: ${{ needs.find_exercise.outputs.issue-number }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Post checking work message
+        id: post
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('.github/markdown-templates/exercise/checking-work.md', 'utf8');
+
+            const { data: comment } = await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.ISSUE_NUMBER),
+              body
+            });
+            core.setOutput('comment-id', comment.id);
+
+  validate_exercise:
+    name: Validate Module 10 Exercise
+    runs-on: ubuntu-latest
+    needs: post_checking_message
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install backend dependencies
+        run: npm install
+        working-directory: backend
+
+      - name: Install frontend dependencies
+        run: npm install
+        working-directory: frontend
+
+      - name: Typecheck backend
+        run: npx tsc --noEmit
+        working-directory: backend
+
+      - name: Typecheck frontend
+        run: npx tsc --noEmit
+        working-directory: frontend
+
+      - name: Run tests
+        run: npm test
+        working-directory: backend
+
+      - name: Check required implementation files exist
+        run: |
+          test -s backend/src/utils/report.ts || (echo "::error::backend/src/utils/report.ts is missing or empty" && exit 1)
+          test -s backend/src/routes/reports.ts || (echo "::error::backend/src/routes/reports.ts is missing or empty" && exit 1)
+          test -s frontend/src/components/ReportView.tsx || (echo "::error::frontend/src/components/ReportView.tsx is missing or empty" && exit 1)
+
+      - name: Check agent definition exists
+        run: |
+          if ! find .claude/agents -name "*.md" 2>/dev/null | grep -q .; then
+            echo "::error::No agent definition found in .claude/agents/ — complete Step 2 before pushing"
+            exit 1
+          fi
+
+      - name: Check reflection document exists
+        run: |
+          test -s docs/reflection.md || (echo "::error::docs/reflection.md is missing or empty — complete Step 7 before pushing" && exit 1)
+
+  post_final_content:
+    name: Post final content
+    needs: [find_exercise, validate_exercise]
+    if: needs.validate_exercise.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      ISSUE_REPOSITORY: ${{ github.repository }}
+      ISSUE_NUMBER: ${{ needs.find_exercise.outputs.issue-number }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Disable current workflow
+        run: |
+          gh workflow disable "${{github.workflow}}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  finish_exercise:
+    name: Finish Exercise
+    needs: [find_exercise, post_checking_message, validate_exercise]
+    if: needs.validate_exercise.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      ISSUE_NUMBER: ${{ needs.find_exercise.outputs.issue-number }}
+      ISSUE_URL: ${{ needs.find_exercise.outputs.issue-url }}
+      CHECKING_COMMENT_ID: ${{ needs.post_checking_message.outputs.comment-id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update issue and build final README
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            function render(path, vars) {
+              let text = fs.readFileSync(path, 'utf8');
+              for (const [key, value] of Object.entries(vars)) {
+                text = text.replaceAll(`{{ ${key} }}`, value);
+              }
+              return text;
+            }
+            const finalComment = render('.github/markdown-templates/exercise/exercise-finished.md', {
+              title: process.env.MODULE_TITLE,
+              login: context.actor,
+              repo_full_name: `${context.repo.owner}/${context.repo.repo}`
+            });
+            const finalReadme = render('.github/markdown-templates/readme/exercise-finished.md', {
+              login: context.actor,
+              issue_url: process.env.ISSUE_URL
+            });
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: Number(process.env.CHECKING_COMMENT_ID),
+              body: finalComment
+            });
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.ISSUE_NUMBER),
+              state: 'closed'
+            });
+            fs.writeFileSync('README.md', finalReadme);
+
+      - name: Commit and push README
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Congratulations!🎉"
+            git push
+          fi
+
+  post_mistake_message:
+    name: Post mistake message
+    needs: [post_checking_message, validate_exercise]
+    if: always() && needs.validate_exercise.result == 'failure'
+    runs-on: ubuntu-latest
+    env:
+      CHECKING_COMMENT_ID: ${{ needs.post_checking_message.outputs.comment-id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Post mistake message
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const feedback = "One or more checks failed. Check the Actions tab for details on which step failed — typecheck, tests, required files, agent definition, or reflection document.";
+            let body = fs.readFileSync('.github/markdown-templates/exercise/step-mistake.md', 'utf8');
+            body = body.replaceAll('{{ feedback_message }}', feedback);
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: Number(process.env.CHECKING_COMMENT_ID),
+              body
+            });

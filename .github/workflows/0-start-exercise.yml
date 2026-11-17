@@ -1,0 +1,200 @@
+name: Step 0 # Start Exercise
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+# Set these variables to have the correct exercise name and module title.
+env:
+  STEP_1_FILE: ".github/steps/1-step.md"
+  MODULE_TITLE: "Subagents and Parallel Execution"
+
+jobs:
+  disable_workflows:
+    if: |
+      !github.event.repository.is_template
+    name: Disable exercise workflows
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Disable all exercise workflows
+        run: |
+          # Find all numbered workflow files except Step 1. Step 1 is safe to leave
+          # enabled because its path filter only matches learner work and its
+          # check_initial_commit job no-ops on the bootstrap commit. Keeping it enabled
+          # avoids depending on GitHub's workflow-catalog indexing after repo creation.
+          workflows=$(git ls-files | grep -E '^\.github/workflows/[0-9].*\.(yml|yaml)$' | grep -vE '^\.github/workflows/1-')
+          for workflow in $workflows; do
+            workflow_name="$(basename "$workflow")"
+            echo "Disabling workflow: $workflow_name"
+            gh workflow disable "$workflow_name" || true
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  create_exercise:
+    name: Create exercise issue and update README
+    runs-on: ubuntu-latest
+
+    outputs:
+      issue-url: ${{ steps.create-issue.outputs.ISSUE_URL }}
+      issue-number: ${{ steps.create-issue.outputs.ISSUE_NUMBER }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Find and replace image URLs in step files and templates
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+
+            // Process step files with ../images/* pattern
+            const stepGlobber = await glob.create('.github/steps/*.md');
+            const stepFiles = await stepGlobber.glob();
+
+            stepFiles.forEach(file => {
+              const content = fs.readFileSync(file, 'utf8');
+
+              // Replace ../images/* links with GitHub blob URLs suffixed with ?raw=true.
+              const updatedContent = content.replace(
+                /\.\.\/images\/([^\s)"']+)/g,
+                'https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/.github/images/$1?raw=true'
+              );
+
+              if (content !== updatedContent) {
+                fs.writeFileSync(file, updatedContent, 'utf8');
+              }
+            });
+
+            // Process template files with ../../images/* pattern
+            const templatePatterns = [
+              '.github/markdown-templates/exercise/*.md', 
+              '.github/markdown-templates/readme/*.md'
+            ];
+
+            for (const pattern of templatePatterns) {
+              const globber = await glob.create(pattern);
+              const files = await globber.glob();
+
+              files.forEach(file => {
+                const content = fs.readFileSync(file, 'utf8');
+
+                // Replace ../../images/* links with GitHub blob URLs suffixed with ?raw=true.
+                const updatedContent = content.replace(
+                  /\.\.\/\.\.\/images\/([^\s)"']+)/g,
+                  'https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/.github/images/$1?raw=true'
+                );
+
+                if (content !== updatedContent) {
+                  fs.writeFileSync(file, updatedContent, 'utf8');
+                }
+              });
+            }
+
+      - name: Build welcome message from local template
+        id: build-welcome-message
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const vars = {
+              title: process.env.MODULE_TITLE,
+              login: context.actor,
+              intro_message: 'Learn to orchestrate AI for rapid software development, transitioning from a manual coder to an AI-driven developer.'
+            };
+            let text = fs.readFileSync('.github/markdown-templates/exercise/welcome.md', 'utf8');
+            for (const [key, value] of Object.entries(vars)) {
+              text = text.replaceAll(`{{ ${key} }}`, value);
+            }
+            core.setOutput('updated-text', text);
+
+      - name: Create issue with welcome message
+        id: create-issue
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { data: issue } = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Exercise: ${{ env.MODULE_TITLE }}`,
+              body: process.env.ISSUE_BODY
+            });
+            core.setOutput('ISSUE_URL', issue.html_url);
+            core.setOutput('ISSUE_NUMBER', issue.number);
+        env:
+          ISSUE_BODY: ${{ steps.build-welcome-message.outputs.updated-text }}
+
+      - name: Build new README from local template
+        id: build-new-readme
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const vars = {
+              title: process.env.MODULE_TITLE,
+              login: context.actor,
+              issue_url: process.env.ISSUE_URL
+            };
+            let text = fs.readFileSync('.github/markdown-templates/readme/exercise-started.md', 'utf8');
+            for (const [key, value] of Object.entries(vars)) {
+              text = text.replaceAll(`{{ ${key} }}`, value);
+            }
+            core.setOutput('updated-text', text);
+        env:
+          ISSUE_URL: ${{ steps.create-issue.outputs.ISSUE_URL }}
+
+      - name: Overwrite README
+        env:
+          README_TEXT: ${{ steps.build-new-readme.outputs.updated-text }}
+        run: echo "$README_TEXT" > README.md
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md .github/steps/*.md .github/markdown-templates/exercise/*.md .github/markdown-templates/readme/*.md
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Start exercise"
+            git push
+          fi
+
+  post_next_step_content:
+    name: Post next step content
+    runs-on: ubuntu-latest
+    needs: [create_exercise]
+    env:
+      ISSUE_NUMBER: ${{ needs.create_exercise.outputs.issue-number }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Create comment - add step content
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            let body = fs.readFileSync(process.env.STEP_1_FILE, 'utf8');
+            body = body.replaceAll('{{ login }}', context.actor);
+            body = body.replaceAll('{{ full_repo_name }}', `${context.repo.owner}/${context.repo.repo}`);
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.ISSUE_NUMBER),
+              body
+            });
