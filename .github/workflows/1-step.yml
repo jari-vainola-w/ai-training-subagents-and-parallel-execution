@@ -1,0 +1,90 @@
+name: Step 1
+
+on:
+  push:
+    paths:
+      - 'docs/**'
+      - 'backend/**'
+      - 'frontend/**'
+      - '.claude/**'
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+jobs:
+  exercise_checking:
+    name: Start checking
+    uses: ./.github/workflows/exercise-checking.yml
+
+  validate_exercise:
+    name: Validate Module 10 Exercise
+    runs-on: ubuntu-latest
+    needs: exercise_checking
+    if: needs.exercise_checking.outputs.comment-id != ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install backend dependencies
+        run: npm install
+        working-directory: backend
+
+      - name: Install frontend dependencies
+        run: npm install
+        working-directory: frontend
+
+      - name: Typecheck backend
+        run: npx tsc --noEmit
+        working-directory: backend
+
+      - name: Typecheck frontend
+        run: npx tsc --noEmit
+        working-directory: frontend
+
+      - name: Run tests
+        run: npm test
+        working-directory: backend
+
+      - name: Check required implementation files exist
+        run: |
+          test -s backend/src/utils/report.ts || (echo "::error::backend/src/utils/report.ts is missing or empty" && exit 1)
+          test -s backend/src/routes/reports.ts || (echo "::error::backend/src/routes/reports.ts is missing or empty" && exit 1)
+          test -s frontend/src/components/ReportView.tsx || (echo "::error::frontend/src/components/ReportView.tsx is missing or empty" && exit 1)
+
+      - name: Check agent definition exists
+        run: |
+          if ! find .claude/agents -name "*.md" 2>/dev/null | grep -q .; then
+            echo "::error::No agent definition found in .claude/agents/ — complete Step 2 before pushing"
+            exit 1
+          fi
+
+      - name: Check reflection document exists
+        run: |
+          test -s docs/reflection.md || (echo "::error::docs/reflection.md is missing or empty — complete Step 7 before pushing" && exit 1)
+
+  exercise_passed:
+    name: Exercise passed
+    needs: [exercise_checking, validate_exercise]
+    if: needs.validate_exercise.result == 'success'
+    uses: ./.github/workflows/exercise-passed.yml
+    with:
+      module-title: "Subagents and Parallel Execution"
+      issue-url: ${{ needs.exercise_checking.outputs.issue-url }}
+      issue-number: ${{ needs.exercise_checking.outputs.issue-number }}
+      comment-id: ${{ needs.exercise_checking.outputs.comment-id }}
+
+  exercise_failed:
+    name: Exercise failed
+    needs: [exercise_checking, validate_exercise]
+    if: always() && needs.validate_exercise.result == 'failure'
+    uses: ./.github/workflows/exercise-failed.yml
+    with:
+      comment-id: ${{ needs.exercise_checking.outputs.comment-id }}
+      feedback-message: "One or more checks failed. Check the Actions tab for details on which step failed — typecheck, tests, required files, agent definition, or reflection document."

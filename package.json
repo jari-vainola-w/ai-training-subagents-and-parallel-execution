@@ -1,0 +1,12 @@
+{
+  "name": "module10-lab",
+  "private": true,
+  "scripts": {
+    "postinstall": "npm install --prefix backend && npm install --prefix frontend",
+    "dev": "concurrently --names \"api,web\" \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\"",
+    "seed": "npm run seed --prefix backend"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
